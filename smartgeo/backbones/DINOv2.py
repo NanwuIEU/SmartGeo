@@ -1,0 +1,105 @@
+# --<utf-8>--
+
+
+import torch
+from torch import nn
+from torch.nn import functional as F
+from typing import Literal
+from torchsummary import summary
+
+
+# Extract features from a Dino-v2 model
+_DINO_V2_MODELS = Literal["dinov2_vits14", "dinov2_vitb14", "dinov2_vitl14", "dinov2_vitg14"]
+_DINO_FACETS = Literal["query", "key", "value", "token"]
+
+
+class DinoV2(nn.Module):
+    """
+        Extract features from an intermediate layer in Dino-v2
+
+    """
+
+    def __init__(self, model_name: _DINO_V2_MODELS, layer: int = 31, facet: _DINO_FACETS = "value", use_cls=False,
+                 norm_descs=True, device: str = "cuda", pretrained=True) -> None:
+        """
+        Parameters:
+        - model_name:   The DINO-v2 model to use
+        - layer:        The layer to extract features from
+        - facet:        "query", "key", or "value" for the attention
+                        facets. "token" for the output of the layer.
+        - use_cls:      If True, the CLS token (first item) is also
+                        included in the returned list of descriptors.
+                        Otherwise, only patch descriptors are used.
+        - norm_descs:   If True, the descriptors are normalized
+        - device:       PyTorch device to use
+        - pretrained:   If True, load pretrained weights
+        """
+        super().__init__()
+        if pretrained:
+            pass
+
+        self.vit_type: str = model_name
+        print('loading DINOv2 model...')
+        self.dino_model: nn.Module = torch.hub.load(r'./models/backbones/facebookresearch/dinov2', model_name, trust_repo=True, source='local')
+        # print(self.dino_model)
+        self.device = torch.device(device)  
+        self.dino_model = self.dino_model.eval().to(self.device) 
+        self.layer: int = layer
+        self.facet = facet
+        if self.facet == "token":
+            self.fh_handle = self.dino_model.blocks[self.layer].register_forward_hook(self._generate_forward_hook())
+        else:
+            self.fh_handle = self.dino_model.blocks[self.layer].attn.qkv.register_forward_hook(self._generate_forward_hook())
+        self.use_cls = use_cls
+        self.norm_descs = norm_descs
+        # Hook data
+        self._hook_out = None
+
+    def _generate_forward_hook(self):
+        def _forward_hook(module, inputs, output):
+            self._hook_out1 = output
+        return _forward_hook
+
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor: 
+        """
+            Parameters:
+            - img:   The input image
+        """
+        with torch.no_grad():
+            res = self.dino_model(img)
+
+            if self.use_cls:
+                res = self._hook_out1
+            else:
+                res = self._hook_out1[:, 1:, ...]
+
+            if self.facet in ["query", "key", "value"]:
+                d_len = res.shape[2] // 3
+                if self.facet == "query":
+                    res = res[:, :, :d_len]
+                elif self.facet == "key":
+                    res = res[:, :, d_len:2 * d_len]
+                else:
+                    res = res[:, :, 2 * d_len:]
+        if self.norm_descs:
+            res = F.normalize(res, dim=-1)
+        self._hook_out = None  # Reset the hook
+        return res
+
+
+if __name__ == '__main__':
+    x = torch.randn(96, 3, 224, 224).to('cuda')
+    model = DinoV2(model_name='dinov2_vitg14',
+               layer=31, facet="query", use_cls=False,
+                 norm_descs=True, device="cuda", pretrained=True)
+    print(model)
+    print('-' * 70)
+
+
+    # print(model)
+    r = model(x)
+    # summary(model, input_size=(3, 224, 224), batch_size=96, device='cuda')
+    print(f'Input shape is {x.shape}')
+    print(f'Output shape is {r.shape}')
+
